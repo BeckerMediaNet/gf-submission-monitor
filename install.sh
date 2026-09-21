@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 #
-# install.sh — one-command installer.
+# install.sh — installer.
 #
 # On a new server:
-#   curl -fsSL https://raw.githubusercontent.com/BeckerMediaNet/gf-submission-monitor/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/BeckerMediaNet/gf-submission-monitor/main/install.sh -o install.sh
+#   sudo bash install.sh
+#
+# Download it first rather than piping straight into `sudo bash` — piping
+# into sudo can detach the controlling terminal on some servers (sudo's
+# use_pty and similar settings), which breaks the interactive prompts in
+# setup.sh even over a normal SSH session.
 #
 # This clones (or updates) the repo into /opt/gf-monitor and hands off to
 # setup.sh, which asks the configuration questions interactively.

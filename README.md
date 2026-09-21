@@ -5,14 +5,21 @@ submissions in the last N hours**, it posts an alert to Slack. Runs from
 system cron, not WP-Cron, so it keeps working even when the site itself is
 returning 500/503 errors (the exact scenario that prompted this).
 
-## One-command install
+## Install
 
 Once this repo is pushed to GitHub (see "Publishing this repo" below),
 installing on any server is:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/BeckerMediaNet/gf-submission-monitor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/BeckerMediaNet/gf-submission-monitor/main/install.sh -o install.sh
+sudo bash install.sh
 ```
+
+Download-then-run, not `curl | sudo bash` piped directly — piping into
+`sudo` can detach the controlling terminal depending on the server's sudo
+config (`use_pty` and similar), even in a completely normal SSH session,
+which breaks the interactive prompts below. Two commands instead of one,
+but it's the reliable way to get real input to `sudo`.
 
 That command:
 
