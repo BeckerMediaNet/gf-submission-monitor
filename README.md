@@ -18,32 +18,49 @@ That command:
 
 1. Clones this repo into `/opt/gf-monitor` (or pulls the latest if it's
    already installed there).
-2. Hands off to `setup.sh`, which interactively asks for the Slack webhook
-   URL, WordPress path, file-owning user, lookback window, and alert
-   cooldown, and writes them to `.env`.
+2. Hands off to `setup.sh`, which asks whether WordPress runs directly on
+   the server or inside Docker, then the relevant follow-up questions
+   (Slack webhook URL, WordPress path, file-owning/container user,
+   container name if Docker, lookback window, alert cooldown), and writes
+   them to `.env`.
 3. Offers to send a Slack test message immediately.
 4. Runs the real check once so you can see it work.
-5. Offers to install the cron job (every 15 minutes, as the WordPress
-   file-owning user) automatically.
+5. Offers to install the cron job (every 15 minutes) automatically, as the
+   right user for the mode (see below).
 
 Re-running the same command later (e.g. to bump the lookback window)
 pulls the latest code and re-runs setup — it'll ask before overwriting an
 existing `.env`.
 
+## Two deploy modes
+
+- **host** — WordPress and wp-cli run directly on the server. The check
+  runs as `sudo -u $WP_USER wp eval ...`, and the cron job runs as that
+  same file-owning user (e.g. `www-data`).
+- **docker** — WordPress runs in a container. The check runs as
+  `docker exec -u $WP_USER $DOCKER_CONTAINER wp eval ...` — the PHP is
+  passed as an inline string, so nothing needs to be copied into the
+  container. Because `docker exec` itself needs permission (root, or
+  membership in the `docker` group), the cron job runs as a separate
+  `CRON_USER` (defaults to `root`) rather than the in-container user.
+
+`setup.sh` asks which mode applies and, for Docker, lists running
+containers (`docker ps`) before asking which one has wp-cli available.
+
 ## Repo layout
 
 ```
-install.sh              one-command entry point (clone/update + hand off to setup.sh)
-setup.sh                interactive configurator (writes .env, tests Slack, installs cron)
-bin/check-gf-submissions.sh   the actual check, run by cron
-share/gf-count.php      counts Gravity Forms entries via GFAPI (run through `wp eval-file`)
-.env.example            reference list of every config value, for manual editing
-.gitignore              keeps .env, state/, logs/ out of git
+install.sh                    one-command entry point (clone/update + hand off to setup.sh)
+setup.sh                      interactive configurator (writes .env, tests Slack, installs cron)
+bin/check-gf-submissions.sh   the actual check, run by cron (handles both deploy modes)
+.env.example                  reference list of every config value, for manual editing
+.gitignore                    keeps .env, state/, logs/ out of git
 ```
 
 ## Requirements per server
 
-- WP-CLI installed and working (`wp --info`)
+- host mode: WP-CLI installed and working (`wp --info`)
+- docker mode: a running container with wp-cli available (`docker exec <container> wp --info`), and `docker` usable by whichever user runs the cron job
 - `git` and `curl`
 - A Slack Incoming Webhook URL for the alert channel
   (Slack → your workspace → search "Incoming Webhooks" → add to channel)

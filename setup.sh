@@ -27,15 +27,53 @@ fi
 
 if [[ "${SKIP_ENV:-false}" != true ]]; then
   read -rp "Site label (e.g. 'Acme Co - acme.com'): " SITE_LABEL
-  read -rp "WordPress path (folder with wp-config.php) [/var/www/html]: " WP_PATH
-  WP_PATH="${WP_PATH:-/var/www/html}"
 
-  read -rp "Linux user that owns the WordPress files [www-data]: " WP_USER
-  WP_USER="${WP_USER:-www-data}"
+  echo
+  echo "Is WordPress running directly on this server, or inside Docker?"
+  read -rp "Deploy mode [host/docker] (host): " DEPLOY_MODE
+  DEPLOY_MODE="${DEPLOY_MODE:-host}"
+  DEPLOY_MODE="$(echo "$DEPLOY_MODE" | tr '[:upper:]' '[:lower:]')"
 
-  DEFAULT_WP_BIN="$(command -v wp || true)"
-  read -rp "wp-cli binary path [${DEFAULT_WP_BIN:-wp}]: " WP_CLI_BIN
-  WP_CLI_BIN="${WP_CLI_BIN:-${DEFAULT_WP_BIN:-wp}}"
+  DOCKER_CONTAINER=""
+  if [[ "$DEPLOY_MODE" == "docker" ]]; then
+    if command -v docker >/dev/null 2>&1; then
+      echo
+      echo "Running containers on this server:"
+      docker ps --format '  {{.Names}}   ({{.Image}})' || echo "  (couldn't list containers — is docker accessible without sudo here?)"
+      echo
+    else
+      echo "Note: docker isn't on PATH for this shell — you may need to run setup.sh with sudo, or check the container name another way (docker ps)." >&2
+    fi
+    while [[ -z "$DOCKER_CONTAINER" ]]; do
+      read -rp "Name of the running container that has wp-cli available: " DOCKER_CONTAINER
+    done
+
+    read -rp "WordPress path INSIDE the container [/var/www/html]: " WP_PATH
+    WP_PATH="${WP_PATH:-/var/www/html}"
+
+    read -rp "User to run wp-cli as INSIDE the container [www-data]: " WP_USER
+    WP_USER="${WP_USER:-www-data}"
+
+    WP_CLI_BIN="wp"
+
+    echo
+    echo "The cron job that runs this check needs permission to run 'docker exec'"
+    echo "(root, or a user in the 'docker' group)."
+    read -rp "Which host user should the cron job run as? [root]: " CRON_USER
+    CRON_USER="${CRON_USER:-root}"
+  else
+    read -rp "WordPress path (folder with wp-config.php) [/var/www/html]: " WP_PATH
+    WP_PATH="${WP_PATH:-/var/www/html}"
+
+    read -rp "Linux user that owns the WordPress files [www-data]: " WP_USER
+    WP_USER="${WP_USER:-www-data}"
+
+    DEFAULT_WP_BIN="$(command -v wp || true)"
+    read -rp "wp-cli binary path [${DEFAULT_WP_BIN:-wp}]: " WP_CLI_BIN
+    WP_CLI_BIN="${WP_CLI_BIN:-${DEFAULT_WP_BIN:-wp}}"
+
+    CRON_USER="$WP_USER"
+  fi
 
   while [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; do
     read -rp "Slack Incoming Webhook URL: " SLACK_WEBHOOK_URL
@@ -52,9 +90,11 @@ if [[ "${SKIP_ENV:-false}" != true ]]; then
   cat > "$ENV_FILE" <<EOF
 SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
 SITE_LABEL="${SITE_LABEL}"
+DEPLOY_MODE=${DEPLOY_MODE}
 WP_PATH=${WP_PATH}
 WP_CLI_BIN=${WP_CLI_BIN}
 WP_USER=${WP_USER}
+DOCKER_CONTAINER=${DOCKER_CONTAINER}
 LOOKBACK_HOURS=${LOOKBACK_HOURS}
 ALERT_COOLDOWN_HOURS=${ALERT_COOLDOWN_HOURS}
 FORM_IDS=${FORM_IDS}
@@ -70,6 +110,8 @@ set -a
 source "$ENV_FILE"
 set +a
 WP_USER="${WP_USER:-www-data}"
+DEPLOY_MODE="${DEPLOY_MODE:-host}"
+CRON_USER="${CRON_USER:-$([[ "$DEPLOY_MODE" == "docker" ]] && echo root || echo "$WP_USER")}"
 
 chmod +x "$CHECK_SCRIPT"
 mkdir -p "$ROOT_DIR/logs" "$ROOT_DIR/state"
@@ -90,18 +132,18 @@ else
 fi
 
 echo
-read -rp "Install a cron job to run this every 15 minutes as '$WP_USER'? [Y/n]: " DO_CRON
+read -rp "Install a cron job to run this every 15 minutes as '$CRON_USER'? [Y/n]: " DO_CRON
 if [[ ! "${DO_CRON:-Y}" =~ ^[Nn] ]]; then
-  if [[ $EUID -ne 0 ]] && [[ "$(whoami)" != "$WP_USER" ]]; then
+  if [[ $EUID -ne 0 ]] && [[ "$(whoami)" != "$CRON_USER" ]]; then
     echo "Note: installing a crontab for another user usually needs root/sudo." >&2
   fi
   CRON_LINE="*/15 * * * * $CHECK_SCRIPT --env $ENV_FILE >> $ROOT_DIR/logs/cron.log 2>&1"
-  ( crontab -u "$WP_USER" -l 2>/dev/null | grep -vF "$CHECK_SCRIPT" ; echo "$CRON_LINE" ) | crontab -u "$WP_USER" -
-  echo "Installed cron job for $WP_USER:"
+  ( crontab -u "$CRON_USER" -l 2>/dev/null | grep -vF "$CHECK_SCRIPT" ; echo "$CRON_LINE" ) | crontab -u "$CRON_USER" -
+  echo "Installed cron job for $CRON_USER:"
   echo "  $CRON_LINE"
 else
   echo "Skipped. Add it yourself later with:"
-  echo "  crontab -u $WP_USER -e"
+  echo "  crontab -u $CRON_USER -e"
   echo "  */15 * * * * $CHECK_SCRIPT --env $ENV_FILE >> $ROOT_DIR/logs/cron.log 2>&1"
 fi
 

@@ -51,8 +51,10 @@ set +a
 : "${WP_PATH:?WP_PATH not set in $ENV_FILE}"
 
 SITE_LABEL="${SITE_LABEL:-$(hostname)}"
+DEPLOY_MODE="${DEPLOY_MODE:-host}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 WP_USER="${WP_USER:-www-data}"
+DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
 LOOKBACK_HOURS="${LOOKBACK_HOURS:-24}"
 ALERT_COOLDOWN_HOURS="${ALERT_COOLDOWN_HOURS:-6}"
 FORM_IDS="${FORM_IDS:-}"
@@ -95,8 +97,67 @@ if [[ "$TEST_SLACK" == true ]]; then
   fi
 fi
 
+# --- build the PHP to run via `wp eval` -----------------------------------
+# Passed as a single inline string (not a file) so this works identically
+# whether wp-cli runs on the host or inside a Docker container — no file
+# needs to exist inside the container's filesystem.
+build_php_code() {
+  local template
+  template=$(cat <<'PHPEOF'
+if (!class_exists('GFAPI')) {
+    echo "ERROR=Gravity Forms plugin not found or not active\n";
+    return;
+}
+$lookback_hours = (int) '__LOOKBACK_HOURS__';
+if ($lookback_hours <= 0) { $lookback_hours = 24; }
+$form_id_arg = '__FORM_IDS__';
+if ($form_id_arg !== '') {
+    $form_ids = array_filter(array_map('trim', explode(',', $form_id_arg)));
+} else {
+    $all_forms = GFAPI::get_forms(true, false);
+    if (is_wp_error($all_forms)) {
+        echo "ERROR=Could not load forms: " . $all_forms->get_error_message() . "\n";
+        return;
+    }
+    $form_ids = wp_list_pluck($all_forms, 'id');
+}
+if (empty($form_ids)) {
+    echo "ERROR=No active Gravity Forms forms found to check\n";
+    return;
+}
+$start_date = gmdate('Y-m-d H:i:s', time() - ($lookback_hours * HOUR_IN_SECONDS));
+$total = 0;
+foreach ($form_ids as $form_id) {
+    $search_criteria = array('status' => 'active', 'start_date' => $start_date);
+    $count = GFAPI::count_entries($form_id, $search_criteria);
+    if (is_wp_error($count)) { continue; }
+    $total += (int) $count;
+}
+$last_entry_date = 'never';
+$recent = GFAPI::get_entries($form_ids, array('status' => 'active'), array('key' => 'date_created', 'direction' => 'DESC'), array('offset' => 0, 'page_size' => 1));
+if (!is_wp_error($recent) && !empty($recent)) {
+    $last_entry_date = $recent[0]['date_created'];
+}
+echo "COUNT={$total}\n";
+echo "LAST_ENTRY={$last_entry_date}\n";
+echo 'FORMS_CHECKED=' . implode(',', $form_ids) . "\n";
+PHPEOF
+)
+  template="${template//__LOOKBACK_HOURS__/$LOOKBACK_HOURS}"
+  template="${template//__FORM_IDS__/$FORM_IDS}"
+  printf '%s' "$template"
+}
+
+PHP_CODE="$(build_php_code)"
+
 # --- real check ----------------------------------------------------------
-WP_CMD=(sudo -u "$WP_USER" "$WP_CLI_BIN" eval-file "$ROOT_DIR/share/gf-count.php" "$LOOKBACK_HOURS" "$FORM_IDS" --path="$WP_PATH")
+if [[ "$DEPLOY_MODE" == "docker" ]]; then
+  : "${DOCKER_CONTAINER:?DOCKER_CONTAINER not set in $ENV_FILE (DEPLOY_MODE=docker)}"
+  command -v docker >/dev/null 2>&1 || { echo "docker not found on PATH" >&2; exit 1; }
+  WP_CMD=(docker exec -u "$WP_USER" "$DOCKER_CONTAINER" "$WP_CLI_BIN" eval "$PHP_CODE" --path="$WP_PATH")
+else
+  WP_CMD=(sudo -u "$WP_USER" "$WP_CLI_BIN" eval "$PHP_CODE" --path="$WP_PATH")
+fi
 
 RESULT="$("${WP_CMD[@]}" 2>>"$LOG_FILE")"
 WP_EXIT=$?
@@ -113,18 +174,19 @@ record_alert() {
 }
 
 # WP-CLI itself failing (non-zero exit, empty output) usually means the
-# site/DB/PHP is broken — exactly the scenario this monitor exists for.
+# site/DB/PHP is broken (or, in Docker mode, the container isn't running) —
+# exactly the scenario this monitor exists for.
 if [[ $WP_EXIT -ne 0 || -z "$RESULT" ]]; then
-  log "WP-CLI invocation failed (exit $WP_EXIT): $RESULT"
+  log "WP-CLI invocation failed (exit $WP_EXIT, mode=$DEPLOY_MODE): $RESULT"
   if now_alert_allowed; then
-    send_slack ":rotating_light: *${SITE_LABEL}*: Gravity Forms monitor could not run WP-CLI (exit code ${WP_EXIT}). The site or server may be down/broken — check it now."
+    send_slack ":rotating_light: *${SITE_LABEL}*: Gravity Forms monitor could not run WP-CLI (exit code ${WP_EXIT}). The site, container, or server may be down/broken — check it now."
     record_alert
   fi
   exit 1
 fi
 
 if [[ "$RESULT" == ERROR=* ]]; then
-  log "gf-count.php reported: $RESULT"
+  log "wp eval reported: $RESULT"
   if now_alert_allowed; then
     send_slack ":warning: *${SITE_LABEL}*: Gravity Forms monitor error: ${RESULT#ERROR=}"
     record_alert
