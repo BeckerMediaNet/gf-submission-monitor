@@ -6,6 +6,19 @@
 #
 set -uo pipefail
 
+# When this script is run via `curl ... | sudo bash` (as install.sh does),
+# stdin is the pipe carrying the script text itself, not the keyboard —
+# so the `read` prompts below would hang or silently return empty. Force
+# reads to come from the real terminal instead.
+if [[ -r /dev/tty ]]; then
+  exec < /dev/tty
+else
+  echo "No terminal available to read answers from (stdin isn't a tty and /dev/tty isn't accessible)." >&2
+  echo "Download this script and run it directly instead of piping it into bash:" >&2
+  echo "  curl -fsSL https://raw.githubusercontent.com/BeckerMediaNet/gf-submission-monitor/main/install.sh -o install.sh && sudo bash install.sh" >&2
+  exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 CHECK_SCRIPT="$ROOT_DIR/bin/check-gf-submissions.sh"
